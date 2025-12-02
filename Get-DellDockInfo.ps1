@@ -35,10 +35,16 @@
     Supported Dock Models:
     - Dell WD-19S (USB-C)
     - Dell WD-19DC (Dual USB-C)
+    - Dell WD-15 (USB-C)
+    - Dell WD-22TB4 (Thunderbolt 4)
+    - Any Dell WD series docks
 
     Dell USB Vendor ID: 0x413C
-    WD-19S PID: 0xB06E, 0xB06F
-    WD-19DC PID: 0xB0A0, 0xB0A1
+    Common WD Series PIDs:
+    - WD-19S: 0xB06E, 0xB06F
+    - WD-19DC: 0xB0A0, 0xB0A1
+    - WD-15: 0xB06C, 0xB06D
+    - Other WD models detected via pattern matching
 #>
 
 [CmdletBinding()]
@@ -136,10 +142,10 @@ function Get-DockFromDCIM {
         foreach ($dock in $dockDevices) {
             Write-Log "Found dock: $($dock.Model)" -Level Debug
 
-            # Filter for WD-19 series if IncludeAllDocks is not set
+            # Filter for WD series docks if IncludeAllDocks is not set
             if (-not $IncludeAllDocks) {
-                if ($dock.Model -notmatch 'WD-19(S|DC)') {
-                    Write-Log "Skipping non-WD-19S/DC dock: $($dock.Model)" -Level Debug
+                if ($dock.Model -notmatch 'WD[-\s]?\d+') {
+                    Write-Log "Skipping non-WD series dock: $($dock.Model)" -Level Debug
                     continue
                 }
             }
@@ -181,13 +187,17 @@ function Get-DockFromUSB {
     try {
         Write-Log "Querying USB devices for Dell docks" -Level Debug
 
-        # Dell USB Vendor ID and known WD-19 PIDs
+        # Dell USB Vendor ID and known WD series PIDs
         $dellVID = '413C'
-        $wd19PIDs = @(
+        $wdSeriesPIDs = @(
             'B06E',  # WD-19S
             'B06F',  # WD-19S (alternate)
             'B0A0',  # WD-19DC
-            'B0A1'   # WD-19DC (alternate)
+            'B0A1',  # WD-19DC (alternate)
+            'B06C',  # WD-15
+            'B06D',  # WD-15 (alternate)
+            'B0C3',  # WD-22TB4
+            'B0C4'   # WD-22TB4 (alternate)
         )
 
         # Query all PnP devices
@@ -200,14 +210,26 @@ function Get-DockFromUSB {
             if ($device.DeviceID -match "VID_$dellVID&PID_([0-9A-F]{4})") {
                 $pid = $matches[1]
 
-                if ($pid -in $wd19PIDs) {
+                # Check if it's a known WD series PID OR if device name contains "WD"
+                $isWDDock = ($pid -in $wdSeriesPIDs) -or ($device.Name -match 'WD[-\s]?\d+') -or ($device.Description -match 'WD[-\s]?\d+')
+
+                if ($isWDDock) {
                     Write-Log "Found Dell dock via USB: PID $pid" -Level Debug
 
-                    # Determine model based on PID
+                    # Determine model based on PID or device name
                     $model = switch ($pid) {
                         { $_ -in @('B06E', 'B06F') } { 'Dell WD-19S' }
                         { $_ -in @('B0A0', 'B0A1') } { 'Dell WD-19DC' }
-                        default { 'Dell WD-19 Series' }
+                        { $_ -in @('B06C', 'B06D') } { 'Dell WD-15' }
+                        { $_ -in @('B0C3', 'B0C4') } { 'Dell WD-22TB4' }
+                        default {
+                            # Try to extract model from device name
+                            if ($device.Name -match '(WD[-\s]?\d+\w*)') {
+                                "Dell $($matches[1])"
+                            } else {
+                                'Dell WD Series'
+                            }
+                        }
                     }
 
                     # Extract serial number from DeviceID if available
@@ -249,7 +271,7 @@ function Get-DockFromUSB {
         }
 
         if ($results.Count -eq 0) {
-            Write-Log "No Dell WD-19 docks found via USB enumeration" -Level Debug
+            Write-Log "No Dell WD series docks found via USB enumeration" -Level Debug
         }
 
         return $results
@@ -281,11 +303,17 @@ function Get-DockFromThunderbolt {
         $results = @()
 
         foreach ($device in $tbDevices) {
-            # Look for Dell identifiers in device names
-            if ($device.Name -match 'Dell.*WD-19(S|DC)' -or $device.Description -match 'Dell.*WD-19(S|DC)') {
+            # Look for Dell WD series identifiers in device names
+            if ($device.Name -match 'Dell.*WD[-\s]?\d+' -or $device.Description -match 'Dell.*WD[-\s]?\d+') {
                 Write-Log "Found Dell dock via Thunderbolt: $($device.Name)" -Level Debug
 
-                $model = if ($device.Name -match 'WD-19DC') { 'Dell WD-19DC' } else { 'Dell WD-19S' }
+                # Extract model from device name
+                $model = 'Dell WD Series'
+                if ($device.Name -match '(WD[-\s]?\d+\w*)') {
+                    $model = "Dell $($matches[1])"
+                } elseif ($device.Description -match '(WD[-\s]?\d+\w*)') {
+                    $model = "Dell $($matches[1])"
+                }
 
                 $dockInfo = [PSCustomObject]@{
                     DetectionMethod = 'ThunderboltEnumeration'
@@ -303,7 +331,7 @@ function Get-DockFromThunderbolt {
         }
 
         if ($results.Count -eq 0) {
-            Write-Log "No Dell WD-19 docks found via Thunderbolt enumeration" -Level Debug
+            Write-Log "No Dell WD series docks found via Thunderbolt enumeration" -Level Debug
         }
 
         return $results
@@ -361,11 +389,11 @@ if ($allDocks.Count -eq 0) {
 
 # Handle no docks found
 if ($allDocks.Count -eq 0) {
-    Write-Log "No Dell WD-19S or WD-19DC docks detected on this system" -Level Warning
+    Write-Log "No Dell WD series docks detected on this system" -Level Warning
 
     $result = [PSCustomObject]@{
         DockDetected    = $false
-        Message         = 'No Dell WD-19S or WD-19DC docking stations detected'
+        Message         = 'No Dell WD series docking stations detected'
         DetectionDate   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         ComputerName    = $env:COMPUTERNAME
         Docks           = @()
@@ -376,7 +404,7 @@ if ($allDocks.Count -eq 0) {
             return $result | ConvertTo-Json -Depth 5 -Compress
         }
         'Text' {
-            return "No Dell WD-19S or WD-19DC docking stations detected on $($env:COMPUTERNAME)"
+            return "No Dell WD series docking stations detected on $($env:COMPUTERNAME)"
         }
         default {
             return $result
