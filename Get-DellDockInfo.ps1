@@ -1,12 +1,13 @@
 <#
 .SYNOPSIS
-    Detects Dell WD-19S and WD-19DC docking stations and retrieves their serial numbers.
+    Detects Dell WD series docking stations and retrieves their serial numbers (v2.0 - SysInv Support).
 
 .DESCRIPTION
-    This script uses multiple detection methods to identify Dell WD-19 series docks:
-    1. Dell Command | Monitor WMI classes (primary method)
-    2. USB device enumeration with VID/PID matching (fallback)
-    3. Thunderbolt device detection (secondary fallback)
+    This script uses multiple detection methods to identify Dell WD series docks:
+    1. Dell Command | Monitor WMI classes (DCIM namespace - primary method)
+    2. Dell SysInv WMI namespace (root\dell\sysinv - provides real serials without DCM)
+    3. USB device enumeration with VID/PID matching (fallback)
+    4. Thunderbolt device detection (final fallback)
 
     Designed for deployment via Microsoft Intune as a detection or inventory script.
 
@@ -168,6 +169,69 @@ function Get-DockFromDCIM {
     }
     catch {
         Write-Log "Error querying DCIM namespace: $($_.Exception.Message)" -Level Warning
+        return $null
+    }
+}
+
+function Get-DockFromSysInv {
+    <#
+    .SYNOPSIS
+        Retrieves dock information from Dell SysInv WMI namespace.
+    .DESCRIPTION
+        Queries the dell_softwareidentity class in root\dell\sysinv namespace
+        which contains dock firmware and serial information on Dell systems.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param()
+
+    try {
+        Write-Log "Querying dell_softwareidentity WMI class" -Level Debug
+
+        # Query SysInv namespace for dock firmware/software identities
+        $dockDevices = Get-CimInstance -Namespace 'root\dell\sysinv' -ClassName 'dell_softwareidentity' -ErrorAction Stop
+
+        if (-not $dockDevices) {
+            Write-Log "No devices found in dell\sysinv namespace" -Level Debug
+            return $null
+        }
+
+        $results = @()
+
+        foreach ($device in $dockDevices) {
+            # Look for WD series docks in ElementName
+            if ($device.ElementName -match 'WD[-\s]?\d+') {
+                Write-Log "Found dock in SysInv: $($device.ElementName)" -Level Debug
+
+                # Extract model from ElementName (e.g., "WD22TB4 Firmware" -> "WD22TB4")
+                $model = 'Dell WD Series'
+                if ($device.ElementName -match '(WD[-\s]?\d+\w*)') {
+                    $model = "Dell $($matches[1])"
+                }
+
+                $dockInfo = [PSCustomObject]@{
+                    DetectionMethod = 'DellSysInv'
+                    Model           = $model
+                    SerialNumber    = $device.SerialNumber
+                    FirmwareVersion = $device.VersionString
+                    Status          = 'OK'
+                    Connected       = $true
+                    DeviceID        = $device.InstanceID
+                    Manufacturer    = 'Dell Inc.'
+                }
+
+                $results += $dockInfo
+            }
+        }
+
+        if ($results.Count -eq 0) {
+            Write-Log "No Dell WD series docks found in SysInv namespace" -Level Debug
+        }
+
+        return $results
+    }
+    catch {
+        Write-Log "Error querying dell\sysinv namespace: $($_.Exception.Message)" -Level Warning
         return $null
     }
 }
@@ -435,7 +499,18 @@ else {
     Write-Log "Dell Command | Monitor not available, using fallback methods" -Level Warning
 }
 
-# Method 2: USB enumeration (fallback if DCIM not available or found nothing)
+# Method 2: Try Dell SysInv namespace (available on Dell systems without DCM)
+if ($allDocks.Count -eq 0) {
+    Write-Log "Attempting Dell SysInv WMI query" -Level Info
+    $sysInvDocks = Get-DockFromSysInv
+
+    if ($sysInvDocks) {
+        $allDocks += $sysInvDocks
+        Write-Log "Found $($sysInvDocks.Count) dock(s) via Dell SysInv" -Level Info
+    }
+}
+
+# Method 3: USB enumeration (fallback if WMI methods not available or found nothing)
 if ($allDocks.Count -eq 0) {
     Write-Log "Attempting USB device enumeration" -Level Info
     $usbDocks = Get-DockFromUSB
@@ -446,7 +521,7 @@ if ($allDocks.Count -eq 0) {
     }
 }
 
-# Method 3: Thunderbolt enumeration (secondary fallback)
+# Method 4: Thunderbolt enumeration (final fallback)
 if ($allDocks.Count -eq 0) {
     Write-Log "Attempting Thunderbolt device enumeration" -Level Info
     $tbDocks = Get-DockFromThunderbolt
@@ -482,16 +557,56 @@ if ($allDocks.Count -eq 0) {
     }
 }
 
+# Deduplicate docks (multiple USB interfaces may represent the same physical dock)
+$uniqueDocks = @()
+$processedSerials = @{}
+
+foreach ($dock in $allDocks) {
+    # Create a unique key based on ProductID and SerialNumber
+    $key = "$($dock.ProductID)_$($dock.SerialNumber)"
+
+    # If this is a sub-interface (MI_XX) and we already have the parent, skip it
+    if ($dock.DeviceID -match '&MI_\d+\\' -and $dock.SerialNumber -eq 'Unknown') {
+        # Check if we have a better entry (parent device) with same PID
+        $parentExists = $allDocks | Where-Object {
+            $_.ProductID -eq $dock.ProductID -and
+            $_.DeviceID -notmatch '&MI_\d+\\' -and
+            $_.SerialNumber -ne 'Unknown'
+        }
+
+        if ($parentExists) {
+            Write-Log "Skipping sub-interface: $($dock.DeviceID)" -Level Debug
+            continue
+        }
+    }
+
+    # If we haven't seen this dock yet, or this one has better info, add/update it
+    if (-not $processedSerials.ContainsKey($dock.ProductID)) {
+        $processedSerials[$dock.ProductID] = $dock
+    }
+    else {
+        # If current dock has serial and stored one doesn't, replace it
+        $stored = $processedSerials[$dock.ProductID]
+        if ($dock.SerialNumber -ne 'Unknown' -and $stored.SerialNumber -eq 'Unknown') {
+            $processedSerials[$dock.ProductID] = $dock
+            Write-Log "Updated dock entry with better serial: $($dock.SerialNumber)" -Level Debug
+        }
+    }
+}
+
+# Convert hashtable to array
+$uniqueDocks = $processedSerials.Values
+
 # Prepare final output
 $output = [PSCustomObject]@{
     DockDetected    = $true
-    DockCount       = $allDocks.Count
+    DockCount       = $uniqueDocks.Count
     DetectionDate   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     ComputerName    = $env:COMPUTERNAME
-    Docks           = $allDocks
+    Docks           = $uniqueDocks
 }
 
-Write-Log "Successfully detected $($allDocks.Count) dock(s)" -Level Info
+Write-Log "Successfully detected $($uniqueDocks.Count) unique dock(s)" -Level Info
 
 # Return results in requested format
 switch ($OutputFormat) {
