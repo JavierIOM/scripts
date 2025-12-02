@@ -562,14 +562,23 @@ $uniqueDocks = @()
 $processedSerials = @{}
 
 foreach ($dock in $allDocks) {
-    # Create a unique key based on ProductID and SerialNumber
-    $key = "$($dock.ProductID)_$($dock.SerialNumber)"
+    # Create a unique key based on Model, SerialNumber, or ProductID
+    $key = if ($dock.SerialNumber -and $dock.SerialNumber -ne 'Unknown') {
+        # Use serial number as primary key if available
+        $dock.SerialNumber
+    } elseif ($dock.ProductID) {
+        # Use ProductID for USB-detected docks
+        "$($dock.ProductID)_$($dock.Model)"
+    } else {
+        # Use Model and DeviceID for other detection methods
+        "$($dock.Model)_$($dock.DeviceID)"
+    }
 
     # If this is a sub-interface (MI_XX) and we already have the parent, skip it
     if ($dock.DeviceID -match '&MI_\d+\\' -and $dock.SerialNumber -eq 'Unknown') {
-        # Check if we have a better entry (parent device) with same PID
+        # Check if we have a better entry (parent device) with same model
         $parentExists = $allDocks | Where-Object {
-            $_.ProductID -eq $dock.ProductID -and
+            $_.Model -eq $dock.Model -and
             $_.DeviceID -notmatch '&MI_\d+\\' -and
             $_.SerialNumber -ne 'Unknown'
         }
@@ -581,14 +590,15 @@ foreach ($dock in $allDocks) {
     }
 
     # If we haven't seen this dock yet, or this one has better info, add/update it
-    if (-not $processedSerials.ContainsKey($dock.ProductID)) {
-        $processedSerials[$dock.ProductID] = $dock
+    if (-not $processedSerials.ContainsKey($key)) {
+        $processedSerials[$key] = $dock
     }
     else {
         # If current dock has serial and stored one doesn't, replace it
-        $stored = $processedSerials[$dock.ProductID]
-        if ($dock.SerialNumber -ne 'Unknown' -and $stored.SerialNumber -eq 'Unknown') {
-            $processedSerials[$dock.ProductID] = $dock
+        $stored = $processedSerials[$key]
+        if ($dock.SerialNumber -and $dock.SerialNumber -ne 'Unknown' -and
+            ($stored.SerialNumber -eq 'Unknown' -or -not $stored.SerialNumber)) {
+            $processedSerials[$key] = $dock
             Write-Log "Updated dock entry with better serial: $($dock.SerialNumber)" -Level Debug
         }
     }
