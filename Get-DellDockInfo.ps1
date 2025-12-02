@@ -1,0 +1,430 @@
+<#
+.SYNOPSIS
+    Detects Dell WD-19S and WD-19DC docking stations and retrieves their serial numbers.
+
+.DESCRIPTION
+    This script uses multiple detection methods to identify Dell WD-19 series docks:
+    1. Dell Command | Monitor WMI classes (primary method)
+    2. USB device enumeration with VID/PID matching (fallback)
+    3. Thunderbolt device detection (secondary fallback)
+
+    Designed for deployment via Microsoft Intune as a detection or inventory script.
+
+.PARAMETER OutputFormat
+    Specifies the output format: Object, JSON, or Text. Default is Object.
+
+.PARAMETER IncludeAllDocks
+    When specified, includes all detected Dell docks, not just WD-19S/WD-19DC models.
+
+.EXAMPLE
+    .\Get-DellDockInfo.ps1
+    Returns a custom object with dock information.
+
+.EXAMPLE
+    .\Get-DellDockInfo.ps1 -OutputFormat JSON
+    Returns dock information in JSON format for easy parsing.
+
+.NOTES
+    Author: Intune Automation
+    Version: 1.0
+    Prerequisites:
+    - Dell Command | Monitor (recommended but not required)
+    - Administrative privileges for full WMI access
+    - Windows 10/11 with Dell Latitude or Precision laptops
+
+    Supported Dock Models:
+    - Dell WD-19S (USB-C)
+    - Dell WD-19DC (Dual USB-C)
+
+    Dell USB Vendor ID: 0x413C
+    WD-19S PID: 0xB06E, 0xB06F
+    WD-19DC PID: 0xB0A0, 0xB0A1
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('Object', 'JSON', 'Text')]
+    [string]$OutputFormat = 'Object',
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludeAllDocks
+)
+
+#region Helper Functions
+
+function Write-Log {
+    <#
+    .SYNOPSIS
+        Writes log messages with timestamp for debugging.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Info', 'Warning', 'Error', 'Debug')]
+        [string]$Level = 'Info'
+    )
+
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $logMessage = "[$timestamp] [$Level] $Message"
+
+    switch ($Level) {
+        'Error'   { Write-Error $logMessage }
+        'Warning' { Write-Warning $logMessage }
+        'Debug'   { Write-Debug $logMessage }
+        default   { Write-Verbose $logMessage }
+    }
+}
+
+function Test-DellCommandMonitor {
+    <#
+    .SYNOPSIS
+        Checks if Dell Command | Monitor is installed and accessible.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    try {
+        Write-Log "Checking for Dell Command | Monitor installation" -Level Debug
+
+        # Check for DCIM namespace (Dell Command | Monitor WMI namespace)
+        $namespace = Get-CimInstance -Namespace 'root' -ClassName '__NAMESPACE' -Filter "Name='DCIM'" -ErrorAction SilentlyContinue
+
+        if ($namespace) {
+            Write-Log "Dell Command | Monitor detected" -Level Debug
+            return $true
+        }
+
+        Write-Log "Dell Command | Monitor not found" -Level Debug
+        return $false
+    }
+    catch {
+        Write-Log "Error checking for Dell Command | Monitor: $($_.Exception.Message)" -Level Warning
+        return $false
+    }
+}
+
+function Get-DockFromDCIM {
+    <#
+    .SYNOPSIS
+        Retrieves dock information using Dell Command | Monitor WMI classes.
+    .DESCRIPTION
+        Queries the DCIM_DockingDevice class which provides comprehensive
+        information about Dell docking stations including model and serial number.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param()
+
+    try {
+        Write-Log "Querying DCIM_DockingDevice WMI class" -Level Debug
+
+        # Query DCIM namespace for docking devices
+        $dockDevices = Get-CimInstance -Namespace 'root\DCIM\SYSMAN' -ClassName 'DCIM_DockingDevice' -ErrorAction Stop
+
+        if (-not $dockDevices) {
+            Write-Log "No docking devices found in DCIM namespace" -Level Debug
+            return $null
+        }
+
+        $results = @()
+
+        foreach ($dock in $dockDevices) {
+            Write-Log "Found dock: $($dock.Model)" -Level Debug
+
+            # Filter for WD-19 series if IncludeAllDocks is not set
+            if (-not $IncludeAllDocks) {
+                if ($dock.Model -notmatch 'WD-19(S|DC)') {
+                    Write-Log "Skipping non-WD-19S/DC dock: $($dock.Model)" -Level Debug
+                    continue
+                }
+            }
+
+            $dockInfo = [PSCustomObject]@{
+                DetectionMethod = 'DellCommandMonitor'
+                Model           = $dock.Model
+                SerialNumber    = $dock.SerialNumber
+                FirmwareVersion = $dock.FirmwareVersion
+                Status          = $dock.Status
+                Connected       = $true
+                DeviceID        = $dock.DeviceID
+                Manufacturer    = 'Dell Inc.'
+            }
+
+            $results += $dockInfo
+        }
+
+        return $results
+    }
+    catch {
+        Write-Log "Error querying DCIM namespace: $($_.Exception.Message)" -Level Warning
+        return $null
+    }
+}
+
+function Get-DockFromUSB {
+    <#
+    .SYNOPSIS
+        Retrieves dock information by querying USB devices with Dell VID/PID.
+    .DESCRIPTION
+        Fallback method that queries Win32_PnPEntity for USB devices matching
+        Dell's Vendor ID (0x413C) and known WD-19 series Product IDs.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param()
+
+    try {
+        Write-Log "Querying USB devices for Dell docks" -Level Debug
+
+        # Dell USB Vendor ID and known WD-19 PIDs
+        $dellVID = '413C'
+        $wd19PIDs = @(
+            'B06E',  # WD-19S
+            'B06F',  # WD-19S (alternate)
+            'B0A0',  # WD-19DC
+            'B0A1'   # WD-19DC (alternate)
+        )
+
+        # Query all PnP devices
+        $usbDevices = Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPClass='USB' OR DeviceID LIKE '%USB%'" -ErrorAction Stop
+
+        $results = @()
+
+        foreach ($device in $usbDevices) {
+            # Parse VID/PID from DeviceID (format: USB\VID_413C&PID_B06E\...)
+            if ($device.DeviceID -match "VID_$dellVID&PID_([0-9A-F]{4})") {
+                $pid = $matches[1]
+
+                if ($pid -in $wd19PIDs) {
+                    Write-Log "Found Dell dock via USB: PID $pid" -Level Debug
+
+                    # Determine model based on PID
+                    $model = switch ($pid) {
+                        { $_ -in @('B06E', 'B06F') } { 'Dell WD-19S' }
+                        { $_ -in @('B0A0', 'B0A1') } { 'Dell WD-19DC' }
+                        default { 'Dell WD-19 Series' }
+                    }
+
+                    # Extract serial number from DeviceID if available
+                    $serialNumber = 'Unknown'
+                    if ($device.DeviceID -match '\\([A-Z0-9]+)$') {
+                        $serialNumber = $matches[1]
+                    }
+
+                    # Try to get serial from Win32_USBHub
+                    try {
+                        $usbHub = Get-CimInstance -ClassName Win32_USBHub -Filter "DeviceID='$($device.DeviceID)'" -ErrorAction SilentlyContinue
+                        if ($usbHub -and $usbHub.Description) {
+                            # Some Dell docks report serial in description
+                            if ($usbHub.Description -match '\(([A-Z0-9]{7,})\)') {
+                                $serialNumber = $matches[1]
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Log "Could not query USBHub for serial: $($_.Exception.Message)" -Level Debug
+                    }
+
+                    $dockInfo = [PSCustomObject]@{
+                        DetectionMethod = 'USBEnumeration'
+                        Model           = $model
+                        SerialNumber    = $serialNumber
+                        FirmwareVersion = 'N/A'
+                        Status          = $device.Status
+                        Connected       = ($device.Status -eq 'OK')
+                        DeviceID        = $device.DeviceID
+                        Manufacturer    = 'Dell Inc.'
+                        ProductID       = $pid
+                        VendorID        = $dellVID
+                    }
+
+                    $results += $dockInfo
+                }
+            }
+        }
+
+        if ($results.Count -eq 0) {
+            Write-Log "No Dell WD-19 docks found via USB enumeration" -Level Debug
+        }
+
+        return $results
+    }
+    catch {
+        Write-Log "Error querying USB devices: $($_.Exception.Message)" -Level Warning
+        return $null
+    }
+}
+
+function Get-DockFromThunderbolt {
+    <#
+    .SYNOPSIS
+        Retrieves dock information from Thunderbolt device enumeration.
+    .DESCRIPTION
+        Secondary fallback that queries Win32_PnPEntity for Thunderbolt devices
+        matching Dell dock identifiers.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param()
+
+    try {
+        Write-Log "Querying Thunderbolt devices for Dell docks" -Level Debug
+
+        # Query Thunderbolt devices
+        $tbDevices = Get-CimInstance -ClassName Win32_PnPEntity -Filter "DeviceID LIKE '%THUNDERBOLT%' OR Name LIKE '%Thunderbolt%'" -ErrorAction Stop
+
+        $results = @()
+
+        foreach ($device in $tbDevices) {
+            # Look for Dell identifiers in device names
+            if ($device.Name -match 'Dell.*WD-19(S|DC)' -or $device.Description -match 'Dell.*WD-19(S|DC)') {
+                Write-Log "Found Dell dock via Thunderbolt: $($device.Name)" -Level Debug
+
+                $model = if ($device.Name -match 'WD-19DC') { 'Dell WD-19DC' } else { 'Dell WD-19S' }
+
+                $dockInfo = [PSCustomObject]@{
+                    DetectionMethod = 'ThunderboltEnumeration'
+                    Model           = $model
+                    SerialNumber    = 'Unknown'
+                    FirmwareVersion = 'N/A'
+                    Status          = $device.Status
+                    Connected       = ($device.Status -eq 'OK')
+                    DeviceID        = $device.DeviceID
+                    Manufacturer    = 'Dell Inc.'
+                }
+
+                $results += $dockInfo
+            }
+        }
+
+        if ($results.Count -eq 0) {
+            Write-Log "No Dell WD-19 docks found via Thunderbolt enumeration" -Level Debug
+        }
+
+        return $results
+    }
+    catch {
+        Write-Log "Error querying Thunderbolt devices: $($_.Exception.Message)" -Level Warning
+        return $null
+    }
+}
+
+#endregion
+
+#region Main Script Logic
+
+Write-Log "Starting Dell dock detection" -Level Info
+
+# Initialize results array
+$allDocks = @()
+
+# Method 1: Try Dell Command | Monitor (most reliable)
+if (Test-DellCommandMonitor) {
+    Write-Log "Using Dell Command | Monitor for detection" -Level Info
+    $dcimDocks = Get-DockFromDCIM
+
+    if ($dcimDocks) {
+        $allDocks += $dcimDocks
+        Write-Log "Found $($dcimDocks.Count) dock(s) via Dell Command | Monitor" -Level Info
+    }
+}
+else {
+    Write-Log "Dell Command | Monitor not available, using fallback methods" -Level Warning
+}
+
+# Method 2: USB enumeration (fallback if DCIM not available or found nothing)
+if ($allDocks.Count -eq 0) {
+    Write-Log "Attempting USB device enumeration" -Level Info
+    $usbDocks = Get-DockFromUSB
+
+    if ($usbDocks) {
+        $allDocks += $usbDocks
+        Write-Log "Found $($usbDocks.Count) dock(s) via USB enumeration" -Level Info
+    }
+}
+
+# Method 3: Thunderbolt enumeration (secondary fallback)
+if ($allDocks.Count -eq 0) {
+    Write-Log "Attempting Thunderbolt device enumeration" -Level Info
+    $tbDocks = Get-DockFromThunderbolt
+
+    if ($tbDocks) {
+        $allDocks += $tbDocks
+        Write-Log "Found $($tbDocks.Count) dock(s) via Thunderbolt enumeration" -Level Info
+    }
+}
+
+# Handle no docks found
+if ($allDocks.Count -eq 0) {
+    Write-Log "No Dell WD-19S or WD-19DC docks detected on this system" -Level Warning
+
+    $result = [PSCustomObject]@{
+        DockDetected    = $false
+        Message         = 'No Dell WD-19S or WD-19DC docking stations detected'
+        DetectionDate   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        ComputerName    = $env:COMPUTERNAME
+        Docks           = @()
+    }
+
+    switch ($OutputFormat) {
+        'JSON' {
+            return $result | ConvertTo-Json -Depth 5 -Compress
+        }
+        'Text' {
+            return "No Dell WD-19S or WD-19DC docking stations detected on $($env:COMPUTERNAME)"
+        }
+        default {
+            return $result
+        }
+    }
+}
+
+# Prepare final output
+$output = [PSCustomObject]@{
+    DockDetected    = $true
+    DockCount       = $allDocks.Count
+    DetectionDate   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    ComputerName    = $env:COMPUTERNAME
+    Docks           = $allDocks
+}
+
+Write-Log "Successfully detected $($allDocks.Count) dock(s)" -Level Info
+
+# Return results in requested format
+switch ($OutputFormat) {
+    'JSON' {
+        return $output | ConvertTo-Json -Depth 5 -Compress
+    }
+    'Text' {
+        $textOutput = "Dell Dock Detection Results`n"
+        $textOutput += "=" * 50 + "`n"
+        $textOutput += "Computer: $($env:COMPUTERNAME)`n"
+        $textOutput += "Detection Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`n"
+        $textOutput += "Docks Found: $($allDocks.Count)`n`n"
+
+        foreach ($dock in $allDocks) {
+            $textOutput += "Dock Information:`n"
+            $textOutput += "  Model: $($dock.Model)`n"
+            $textOutput += "  Serial Number: $($dock.SerialNumber)`n"
+            $textOutput += "  Detection Method: $($dock.DetectionMethod)`n"
+            $textOutput += "  Connected: $($dock.Connected)`n"
+            $textOutput += "  Status: $($dock.Status)`n"
+            if ($dock.FirmwareVersion -ne 'N/A') {
+                $textOutput += "  Firmware: $($dock.FirmwareVersion)`n"
+            }
+            $textOutput += "`n"
+        }
+
+        return $textOutput
+    }
+    default {
+        return $output
+    }
+}
+
+#endregion
