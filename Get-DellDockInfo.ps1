@@ -208,16 +208,16 @@ function Get-DockFromUSB {
         foreach ($device in $usbDevices) {
             # Parse VID/PID from DeviceID (format: USB\VID_413C&PID_B06E\...)
             if ($device.DeviceID -match "VID_$dellVID&PID_([0-9A-F]{4})") {
-                $pid = $matches[1]
+                $productId = $matches[1]
 
                 # Check if it's a known WD series PID OR if device name contains "WD"
-                $isWDDock = ($pid -in $wdSeriesPIDs) -or ($device.Name -match 'WD[-\s]?\d+') -or ($device.Description -match 'WD[-\s]?\d+')
+                $isWDDock = ($productId -in $wdSeriesPIDs) -or ($device.Name -match 'WD[-\s]?\d+') -or ($device.Description -match 'WD[-\s]?\d+')
 
                 if ($isWDDock) {
-                    Write-Log "Found Dell dock via USB: PID $pid" -Level Debug
+                    Write-Log "Found Dell dock via USB: PID $productId" -Level Debug
 
                     # Determine model based on PID or device name
-                    $model = switch ($pid) {
+                    $model = switch ($productId) {
                         { $_ -in @('B06E', 'B06F') } { 'Dell WD-19S' }
                         { $_ -in @('B0A0', 'B0A1') } { 'Dell WD-19DC' }
                         { $_ -in @('B06C', 'B06D') } { 'Dell WD-15' }
@@ -261,7 +261,7 @@ function Get-DockFromUSB {
                         Connected       = ($device.Status -eq 'OK')
                         DeviceID        = $device.DeviceID
                         Manufacturer    = 'Dell Inc.'
-                        ProductID       = $pid
+                        ProductID       = $productId
                         VendorID        = $dellVID
                     }
 
@@ -303,8 +303,12 @@ function Get-DockFromThunderbolt {
         $results = @()
 
         foreach ($device in $tbDevices) {
-            # Look for Dell WD series identifiers in device names
-            if ($device.Name -match 'Dell.*WD[-\s]?\d+' -or $device.Description -match 'Dell.*WD[-\s]?\d+') {
+            # Look for Dell WD series identifiers in device names or DeviceID
+            $isWDDock = ($device.Name -match 'Dell.*WD[-\s]?\d+') -or
+                        ($device.Description -match 'Dell.*WD[-\s]?\d+') -or
+                        ($device.DeviceID -match 'VID_413C')
+
+            if ($isWDDock) {
                 Write-Log "Found Dell dock via Thunderbolt: $($device.Name)" -Level Debug
 
                 # Extract model from device name
@@ -313,12 +317,78 @@ function Get-DockFromThunderbolt {
                     $model = "Dell $($matches[1])"
                 } elseif ($device.Description -match '(WD[-\s]?\d+\w*)') {
                     $model = "Dell $($matches[1])"
+                } elseif ($device.DeviceID -match 'VID_413C&PID_([0-9A-F]{4})') {
+                    # Try to determine model from PID
+                    $detectedPid = $matches[1]
+                    $model = switch ($detectedPid) {
+                        { $_ -in @('B06E', 'B06F') } { 'Dell WD-19S' }
+                        { $_ -in @('B0A0', 'B0A1') } { 'Dell WD-19DC' }
+                        { $_ -in @('B06C', 'B06D') } { 'Dell WD-15' }
+                        { $_ -in @('B0C3', 'B0C4') } { 'Dell WD-22TB4' }
+                        default { 'Dell WD Series' }
+                    }
+                }
+
+                # Try to extract serial number from various sources
+                $serialNumber = 'Unknown'
+
+                # Method 1: Check for serial in device name or description
+                if ($device.Name -match '\(([A-Z0-9]{7,})\)') {
+                    $serialNumber = $matches[1]
+                } elseif ($device.Description -match '\(([A-Z0-9]{7,})\)') {
+                    $serialNumber = $matches[1]
+                }
+
+                # Method 2: Try to get registry info for this device
+                if ($serialNumber -eq 'Unknown') {
+                    try {
+                        $instanceId = $device.PNPDeviceID
+                        if ($instanceId) {
+                            # Query registry for device properties
+                            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$instanceId"
+                            if (Test-Path $regPath) {
+                                $deviceProps = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+                                if ($deviceProps.HardwareID) {
+                                    # Some docks store serial in HardwareID
+                                    foreach ($hwid in $deviceProps.HardwareID) {
+                                        if ($hwid -match '\\([A-Z0-9]{7,})') {
+                                            $serialNumber = $matches[1]
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Log "Could not query registry for serial: $($_.Exception.Message)" -Level Debug
+                    }
+                }
+
+                # Method 3: Check if there's a parent USB hub device with serial info
+                if ($serialNumber -eq 'Unknown' -and $device.DeviceID -match 'USB') {
+                    try {
+                        # Try to find parent dock device
+                        $usbHubs = Get-CimInstance -ClassName Win32_USBHub -ErrorAction SilentlyContinue
+                        foreach ($hub in $usbHubs) {
+                            if ($hub.DeviceID -match 'VID_413C' -and $hub.Description -match 'WD') {
+                                # Extract serial from hub DeviceID
+                                if ($hub.DeviceID -match '\\([A-Z0-9]{7,})(&|$)') {
+                                    $serialNumber = $matches[1]
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Log "Could not query USB hubs for serial: $($_.Exception.Message)" -Level Debug
+                    }
                 }
 
                 $dockInfo = [PSCustomObject]@{
                     DetectionMethod = 'ThunderboltEnumeration'
                     Model           = $model
-                    SerialNumber    = 'Unknown'
+                    SerialNumber    = $serialNumber
                     FirmwareVersion = 'N/A'
                     Status          = $device.Status
                     Connected       = ($device.Status -eq 'OK')
