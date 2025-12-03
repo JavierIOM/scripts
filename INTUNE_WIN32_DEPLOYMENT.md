@@ -93,7 +93,7 @@ $emailEnabled = $true
 $smtpServer = "smtp.office365.com"
 $smtpPort = 587
 $emailFrom = "intune-alerts@yourcompany.com"
-$emailTo = "gavin.wilby@derivco.co.im"
+$emailTo = "your.email@yourcompany.com"
 $emailUser = "intune-alerts@yourcompany.com"
 $emailPassword = "YourAppPasswordHere"
 ```
@@ -112,7 +112,7 @@ $emailEnabled = $true
 $smtpServer = "smtp.gmail.com"
 $smtpPort = 587
 $emailFrom = "your-account@gmail.com"
-$emailTo = "gavin.wilby@derivco.co.im"
+$emailTo = "your.email@yourcompany.com"
 $emailUser = "your-account@gmail.com"
 $emailPassword = "YourGmailAppPassword"
 ```
@@ -126,15 +126,28 @@ $emailPassword = "YourGmailAppPassword"
 
 ### Option 3: Custom SMTP Server
 
-For corporate SMTP servers:
+For corporate SMTP servers (with or without authentication):
+
+**With Authentication:**
 ```powershell
 $emailEnabled = $true
 $smtpServer = "smtp.yourcompany.com"
-$smtpPort = 25  # or 587 for TLS
+$smtpPort = 587  # Use 587 for TLS or 25 for standard
 $emailFrom = "intune-alerts@yourcompany.com"
-$emailTo = "gavin.wilby@derivco.co.im"
+$emailTo = "your.email@yourcompany.com"
 $emailUser = "smtp-username"
 $emailPassword = "smtp-password"
+```
+
+**Without Authentication (Internal SMTP Relay):**
+```powershell
+$emailEnabled = $true
+$smtpServer = "smtp.yourcompany.com"
+$smtpPort = 25  # Standard SMTP port
+$emailFrom = "intune-alerts@yourcompany.com"
+$emailTo = "your.email@yourcompany.com"
+$emailUser = $null  # No credentials needed
+$emailPassword = $null
 ```
 
 ### Option 4: Disable Email Notifications
@@ -201,13 +214,14 @@ $logPath = "$env:ProgramData\Microsoft\IntuneManagementExtension\Logs\DCM-Instal
 
 # Email Configuration
 $emailEnabled = $true
-$smtpServer = "smtp.office365.com"
-$smtpPort = 587
+$smtpServer = "mail.yourdomain.com"  # Replace with your SMTP server
+$smtpPort = 25  # Standard SMTP port (no auth)
 $emailFrom = "intune-alerts@yourdomain.com"
-$emailTo = "gavin.wilby@derivco.co.im"
+$emailTo = "your.email@yourdomain.com"  # Replace with your email
 $emailSubject = "Dell Command Monitor Installation - $env:COMPUTERNAME"
-$emailUser = "intune-alerts@yourdomain.com"
-$emailPassword = "YourAppPasswordHere"  # Use app password or secure credential
+# No credentials required for internal SMTP relay
+$emailUser = $null
+$emailPassword = $null
 
 # Function to write logs
 function Write-InstallLog {
@@ -340,11 +354,7 @@ function Send-InstallEmail {
 </html>
 "@
 
-        # Create credential
-        $securePassword = ConvertTo-SecureString $emailPassword -AsPlainText -Force
-        $credential = New-Object System.Management.Automation.PSCredential($emailUser, $securePassword)
-
-        # Send email
+        # Build mail parameters
         $mailParams = @{
             From       = $emailFrom
             To         = $emailTo
@@ -353,8 +363,14 @@ function Send-InstallEmail {
             BodyAsHtml = $true
             SmtpServer = $smtpServer
             Port       = $smtpPort
-            UseSsl     = $true
-            Credential = $credential
+        }
+
+        # Add credentials if provided
+        if ($emailUser -and $emailPassword) {
+            $securePassword = ConvertTo-SecureString $emailPassword -AsPlainText -Force
+            $credential = New-Object System.Management.Automation.PSCredential($emailUser, $securePassword)
+            $mailParams.Add('Credential', $credential)
+            $mailParams.Add('UseSsl', $true)
         }
 
         Send-MailMessage @mailParams -ErrorAction Stop
