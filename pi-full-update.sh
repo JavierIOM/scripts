@@ -5,6 +5,11 @@
 
 set -e
 
+# Disable interactive prompts for unattended upgrades
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 LOG_FILE="/home/pi/pi-update-$(date +%Y%m%d-%H%M%S).log"
 
 log() {
@@ -12,8 +17,15 @@ log() {
 }
 
 log "=== Starting Raspberry Pi Full System Update ==="
+log "Configured for non-interactive mode (no prompts)"
 log "Current OS version:"
 cat /etc/os-release | tee -a "$LOG_FILE"
+
+# Pre-configure debconf to automatically restart services
+log "Configuring automatic service restarts..."
+sudo debconf-set-selections <<< 'libssl1.1:amd64 libraries/restart-without-asking boolean true'
+sudo debconf-set-selections <<< 'libc6:amd64 libraries/restart-without-asking boolean true'
+sudo debconf-set-selections <<< 'libpam0g:amd64 libraries/restart-without-asking boolean true'
 
 # Step 1: Synchronize system time
 log "Step 1: Synchronizing system time with NTP server..."
@@ -89,8 +101,8 @@ log "GPG keys imported successfully"
 # Step 5: Update current system
 log "Step 5: Updating current system packages ($CURRENT_VERSION)..."
 sudo apt-get update 2>&1 | tee -a "$LOG_FILE"
-sudo apt-get upgrade -y --fix-missing 2>&1 | tee -a "$LOG_FILE"
-sudo apt-get dist-upgrade -y 2>&1 | tee -a "$LOG_FILE"
+sudo apt-get upgrade -y --fix-missing -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE"
+sudo apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE"
 
 # Step 5a: Upgrade Buster to Bullseye if needed
 if [ "$CURRENT_VERSION" = "buster" ]; then
@@ -107,8 +119,8 @@ if [ "$CURRENT_VERSION" = "buster" ]; then
 
     log "Updated sources to Bullseye"
     sudo apt-get update 2>&1 | tee -a "$LOG_FILE"
-    sudo apt-get upgrade -y --without-new-pkgs 2>&1 | tee -a "$LOG_FILE"
-    sudo apt-get dist-upgrade -y 2>&1 | tee -a "$LOG_FILE"
+    sudo apt-get upgrade -y --without-new-pkgs -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE"
+    sudo apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE"
 
     log "Buster to Bullseye upgrade complete"
     CURRENT_VERSION="bullseye"
@@ -174,11 +186,11 @@ sudo apt-get update 2>&1 | tee -a "$LOG_FILE"
 
 # Step 11: Minimal upgrade first
 log "Step 11: Performing minimal upgrade..."
-sudo apt-get upgrade -y --without-new-pkgs 2>&1 | tee -a "$LOG_FILE"
+sudo apt-get upgrade -y --without-new-pkgs -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE"
 
 # Step 12: Full distribution upgrade
 log "Step 12: Performing full distribution upgrade..."
-sudo apt-get dist-upgrade -y 2>&1 | tee -a "$LOG_FILE"
+sudo apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE"
 
 # Step 13: Clean up
 log "Step 13: Cleaning up old packages..."
@@ -187,7 +199,7 @@ sudo apt-get autoclean -y 2>&1 | tee -a "$LOG_FILE"
 
 # Step 14: Update firmware again
 log "Step 14: Updating firmware for Bookworm..."
-sudo apt-get install --reinstall raspberrypi-bootloader raspberrypi-kernel -y 2>&1 | tee -a "$LOG_FILE" || log "Firmware packages not available"
+sudo apt-get install --reinstall raspberrypi-bootloader raspberrypi-kernel -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1 | tee -a "$LOG_FILE" || log "Firmware packages not available"
 
 log "=== Update Complete ==="
 log "New OS version:"
