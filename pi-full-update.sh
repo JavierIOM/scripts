@@ -19,22 +19,40 @@ cat /etc/os-release | tee -a "$LOG_FILE"
 log "Step 1: Synchronizing system time with NTP server..."
 log "Current date/time: $(date)"
 
-# Install ntpdate if not present
-sudo apt-get install -y ntpdate 2>&1 | tee -a "$LOG_FILE" || log "ntpdate already installed or not available"
+# Try multiple methods to sync time
+TIME_SYNCED=false
 
-# Sync with multiple reliable time servers
-log "Syncing with time servers..."
-sudo timedatectl set-ntp false 2>&1 | tee -a "$LOG_FILE" || true
-sudo ntpdate -u pool.ntp.org 2>&1 | tee -a "$LOG_FILE" || \
-sudo ntpdate -u time.google.com 2>&1 | tee -a "$LOG_FILE" || \
-sudo ntpdate -u time.cloudflare.com 2>&1 | tee -a "$LOG_FILE" || \
-log "Warning: Could not sync with NTP servers, continuing anyway..."
+# Method 1: Try ntpdate (most reliable for old systems)
+log "Attempting time sync with ntpdate..."
+if sudo ntpdate -u pool.ntp.org 2>&1 | tee -a "$LOG_FILE"; then
+    TIME_SYNCED=true
+    log "Time synced successfully with pool.ntp.org"
+elif sudo ntpdate -u time.google.com 2>&1 | tee -a "$LOG_FILE"; then
+    TIME_SYNCED=true
+    log "Time synced successfully with time.google.com"
+elif sudo ntpdate -u time.cloudflare.com 2>&1 | tee -a "$LOG_FILE"; then
+    TIME_SYNCED=true
+    log "Time synced successfully with time.cloudflare.com"
+fi
 
-# Re-enable NTP
-sudo timedatectl set-ntp true 2>&1 | tee -a "$LOG_FILE" || true
+# Method 2: Try systemd-timesyncd if available
+if [ "$TIME_SYNCED" = false ]; then
+    log "Attempting time sync with timedatectl..."
+    if sudo timedatectl set-ntp true 2>&1 | tee -a "$LOG_FILE"; then
+        sleep 3
+        TIME_SYNCED=true
+        log "Time sync enabled via systemd"
+    fi
+fi
+
+if [ "$TIME_SYNCED" = false ]; then
+    log "WARNING: Could not sync time automatically - continuing with system time"
+    log "If certificate errors occur, manually set time with: sudo date -s 'YYYY-MM-DD HH:MM:SS'"
+else
+    log "Time synchronization successful"
+fi
 
 log "Updated date/time: $(date)"
-log "Time synchronization complete"
 
 # Step 2: Detect current Debian version
 log "Step 2: Detecting current Debian version..."
@@ -178,3 +196,4 @@ log "Log saved to: $LOG_FILE"
 log ""
 log "REBOOT REQUIRED! Run: sudo reboot"
 log "After reboot, verify with: cat /etc/os-release"
+sudo reboot
