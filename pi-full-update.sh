@@ -21,11 +21,13 @@ log "Configured for non-interactive mode (no prompts)"
 log "Current OS version:"
 cat /etc/os-release | tee -a "$LOG_FILE"
 
-# Pre-configure debconf to automatically restart services
-log "Configuring automatic service restarts..."
-sudo debconf-set-selections <<< 'libssl1.1:amd64 libraries/restart-without-asking boolean true'
-sudo debconf-set-selections <<< 'libc6:amd64 libraries/restart-without-asking boolean true'
-sudo debconf-set-selections <<< 'libpam0g:amd64 libraries/restart-without-asking boolean true'
+# Step 0: Fix any interrupted dpkg operations
+log "Step 0: Checking for interrupted package operations..."
+if sudo dpkg --configure -a 2>&1 | tee -a "$LOG_FILE"; then
+    log "dpkg check complete"
+else
+    log "WARNING: dpkg --configure -a failed, continuing anyway..."
+fi
 
 # Step 1: Synchronize system time
 log "Step 1: Synchronizing system time with NTP server..."
@@ -172,9 +174,17 @@ fi
 
 # Step 9: Upgrade to Bookworm
 log "Step 9: Upgrading to Bookworm (Debian 12)..."
-sudo sed -i 's/bullseye/bookworm/g' /etc/apt/sources.list
+
+# Write fresh Bookworm sources to avoid any issues
+sudo bash -c 'cat > /etc/apt/sources.list << "EOF"
+deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian-security/ bookworm-security main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+EOF' 2>&1 | tee -a "$LOG_FILE"
+
+# Update Raspberry Pi sources
 if [ -f /etc/apt/sources.list.d/raspi.list ]; then
-    sudo sed -i 's/bullseye/bookworm/g' /etc/apt/sources.list.d/raspi.list
+    echo "deb http://archive.raspberrypi.org/debian/ bookworm main" | sudo tee /etc/apt/sources.list.d/raspi.list > /dev/null
 fi
 
 log "Updated sources.list:"
@@ -208,4 +218,3 @@ log "Log saved to: $LOG_FILE"
 log ""
 log "REBOOT REQUIRED! Run: sudo reboot"
 log "After reboot, verify with: cat /etc/os-release"
-sudo reboot
